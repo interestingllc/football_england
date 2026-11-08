@@ -89,12 +89,19 @@ def short(team):
     return team.get("shortName") or team.get("name") or "?"
 
 
-def to_yerevan(utc_str):
+def parse_yerevan_dt(utc_str):
     try:
         dt = datetime.fromisoformat(utc_str.replace("Z", "+00:00"))
-        return dt.astimezone(YEREVAN_TZ).strftime("%d.%m.%Y %H:%M")
+        return dt.astimezone(YEREVAN_TZ)
     except Exception:
-        return utc_str or "Անհայտ"
+        return None
+
+
+def to_yerevan(utc_str):
+    dt = parse_yerevan_dt(utc_str)
+    if dt:
+        return dt.strftime("%d.%m.%Y %H:%M")
+    return utc_str or "Անհայտ"
 
 
 def find_odds(all_odds, team_name, opp_name):
@@ -104,7 +111,6 @@ def find_odds(all_odds, team_name, opp_name):
         names = {home, away}
         if team_name not in names:
             continue
-        # opponent name may differ slightly between APIs, so match loosely
         other = away if home == team_name else home
         if opp_name and opp_name.split()[0].lower() not in other.lower():
             continue
@@ -127,7 +133,6 @@ def analyse_team(team_id, odds_name, all_odds):
     upcoming = [m for m in matches if m.get("status") in ("SCHEDULED", "TIMED")]
     upcoming.sort(key=lambda m: m.get("utcDate", ""))
 
-    # consecutive matches without a draw (most recent first)
     streak = 0
     for m in finished:
         if m.get("score", {}).get("winner") == "DRAW":
@@ -141,7 +146,7 @@ def analyse_team(team_id, odds_name, all_odds):
             break
 
     info = {"name": odds_name, "streak": streak, "played": len(finished),
-            "last": "—", "next": "Անհայտ", "time": "Անհայտ", "odds": ""}
+            "last": "—", "next": "Անհայt", "time": "Անհայտ", "raw_time": None, "odds": ""}
 
     if finished:
         m = finished[0]
@@ -154,6 +159,7 @@ def analyse_team(team_id, odds_name, all_odds):
         opp = n["awayTeam"] if is_home else n["homeTeam"]
         opp_name = short(opp)
         info["next"] = f"vs {opp_name}" if is_home else f"@ {opp_name}"
+        info["raw_time"] = parse_yerevan_dt(n.get("utcDate", ""))
         info["time"] = to_yerevan(n.get("utcDate", ""))
 
         o = find_odds(all_odds, odds_name, opp_name)
@@ -175,16 +181,21 @@ def run_football(send=True):
         return ""
 
     all_odds = fetch_epl_odds()
-    lines = ["⚽ <b>EPL — ՇԱՐՔ ԱՌԱՆՑ ՈՉ-ՈՔԻԻ</b>\n"]
+    team_infos = []
 
     for team_id, odds_name in TEAMS.items():
         try:
             t = analyse_team(team_id, odds_name, all_odds)
+            team_infos.append(t)
         except Exception as e:
             print(f"Football error for {odds_name}: {e}")
-            lines.append(f"• <b>{odds_name}</b> — տվյալներ ստանալ չհաջողվեց\n")
-            continue
 
+    # Sort teams chronologically by next match time
+    team_infos.sort(key=lambda x: x["raw_time"] if x["raw_time"] is not None else datetime.max.replace(tzinfo=timezone.utc))
+
+    lines = ["⚽ <b>EPL — ՇԱՐՔ ԱՌԱՆՑ ՈՉ-ՈՔԻԻ</b>\n"]
+
+    for t in team_infos:
         hot = t["streak"] >= FOOTBALL_MIN_STREAK
         mark = "🔥" if hot else "▫️"
         lines.append(f"{mark} <b>{t['name']}</b> — <code>{t['streak']} խաղ</code> անընդմեջ առանց ոչ-ոքիի")
