@@ -1,42 +1,36 @@
 """
-Football (Premier League) draw-streak tracker: Aston Villa, Everton.
-
-Principle (same as NHL): count consecutive matches WITHOUT a draw.
-When the streak reaches FOOTBALL_MIN_STREAK, a Fibonacci-step bet on Draw (X)
-is suggested for the next match, together with the bookmaker draw odds.
-
-Data:
-  - Results / fixtures: football-data.org (free tier, Premier League included)
-  - Odds:               The Odds API (sport key: soccer_epl, market h2h -> Home/Draw/Away)
-
-Run alone:      python football.py
-Or from bot.py: from football import run_football ; run_football()
+Football (Premier League) draw-streak tracker: Aston Villa, Everton, etc.
+Counts consecutive matches WITHOUT a draw.
+When streak reaches FOOTBALL_MIN_STREAK, Fibonacci progression starts (base 100 AMD).
+If a draw occurs, the streak resets to 0 and drops from the active list.
 """
 import os
 from datetime import datetime, timedelta, timezone
-
 import requests
 
-# --- Secrets come from environment variables (do NOT hardcode them) ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 API_KEY_ODDS = os.environ.get("API_KEY_ODDS", "")
 FOOTBALL_DATA_TOKEN = os.environ.get("FOOTBALL_DATA_TOKEN", "")
 
-# --- Settings ---
-FOOTBALL_MIN_STREAK = 5        # from how many no-draw matches in a row we alert
-BASE_UNIT = 100                # 100 AMD
-COMPETITION = "PL"             # Premier League only (free tier)
+FOOTBALL_MIN_STREAK = 5        # Սկսում է ազդարարել, երբ 5+ խաղ ոչ-ոքի չկա
+BASE_UNIT = 100                # Հիմնական գումարը՝ 100 AMD
+COMPETITION = "PL"             # Premier League
 YEREVAN_TZ = timezone(timedelta(hours=4))
 
-# football-data.org team id -> name used by The Odds API
+# Թիմեր (կարող եք ցանկը ընդլայնել ըստ ցանկության)
 TEAMS = {
     58: "Aston Villa",
     62: "Everton",
+    65: "Nottingham Forest",
+    66: "Manchester United",
+    64: "Liverpool",
+    61: "Chelsea",
+    57: "Arsenal",
+    63: "Manchester City",
 }
 
 FIBONACCI = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144]
-
 
 def get_fibonacci_bet(streak, min_streak, base_amount=BASE_UNIT):
     idx = max(0, streak - min_streak)
@@ -44,10 +38,9 @@ def get_fibonacci_bet(streak, min_streak, base_amount=BASE_UNIT):
     units = FIBONACCI[idx]
     return idx + 1, units, f"{units * base_amount:,}"
 
-
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram token/chat id not set, message not sent:\n" + msg)
+        print("Telegram token/chat id not set:\n" + msg)
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}
@@ -58,17 +51,14 @@ def send_telegram(msg):
     except Exception as e:
         print(f"Telegram error: {e}")
 
-
 def fetch_team_matches(team_id):
-    """All Premier League matches of the current season for one team."""
     url = f"https://api.football-data.org/v4/teams/{team_id}/matches"
     headers = {"X-Auth-Token": FOOTBALL_DATA_TOKEN}
     params = {"competitions": COMPETITION}
     r = requests.get(url, headers=headers, params=params, timeout=15)
     if r.status_code != 200:
-        raise RuntimeError(f"football-data.org {r.status_code}: {r.text[:200]}")
+        raise RuntimeError(f"football-data.org error {r.status_code}")
     return r.json().get("matches", [])
-
 
 def fetch_epl_odds():
     if not API_KEY_ODDS:
@@ -79,15 +69,12 @@ def fetch_epl_odds():
         r = requests.get(url, params=params, timeout=15)
         if r.status_code == 200:
             return r.json()
-        print(f"Odds API error {r.status_code}: {r.text[:200]}")
     except Exception as e:
         print(f"Odds API error: {e}")
     return []
 
-
 def short(team):
     return team.get("shortName") or team.get("name") or "?"
-
 
 def parse_yerevan_dt(utc_str):
     try:
@@ -96,20 +83,16 @@ def parse_yerevan_dt(utc_str):
     except Exception:
         return None
 
-
 def to_yerevan(utc_str):
     dt = parse_yerevan_dt(utc_str)
     if dt:
         return dt.strftime("%d.%m.%Y %H:%M")
     return utc_str or "Անհայտ"
 
-
 def find_odds(all_odds, team_name, opp_name):
-    """Returns (bookmaker, home_team, home_price, draw_price, away_price, away_team) or None."""
     for game in all_odds:
         home, away = game.get("home_team", ""), game.get("away_team", "")
-        names = {home, away}
-        if team_name not in names:
+        if team_name not in {home, away}:
             continue
         other = away if home == team_name else home
         if opp_name and opp_name.split()[0].lower() not in other.lower():
@@ -123,30 +106,23 @@ def find_odds(all_odds, team_name, opp_name):
                     return (bm.get("title", ""), home, prices.get(home), prices["Draw"], prices.get(away), away)
     return None
 
-
 def analyse_team(team_id, odds_name, all_odds):
     matches = fetch_team_matches(team_id)
-
-    finished = [m for m in matches if m.get("status") == "FINISHED"]
+    finished = [m for m in matches if m.get("status"] == "FINISHED"]
     finished.sort(key=lambda m: m.get("utcDate", ""), reverse=True)
-
-    upcoming = [m for m in matches if m.get("status") in ("SCHEDULED", "TIMED")]
+    upcoming = [m for m in matches if m.get("status"] in ("SCHEDULED", "TIMED")]
     upcoming.sort(key=lambda m: m.get("utcDate", ""))
 
+    # Քանի խաղ անընդմեջ ոչ-ոքի չի եղել (մինչև առաջին DRAW հանդիպումը)
     streak = 0
     for m in finished:
-        if m.get("score", {}).get("winner") == "DRAW":
+        winner = m.get("score", {}).get("winner")
+        if winner == "DRAW":
             break
         streak += 1
 
-    last_draw_ago = None
-    for i, m in enumerate(finished):
-        if m.get("score", {}).get("winner") == "DRAW":
-            last_draw_ago = i
-            break
-
     info = {"name": odds_name, "streak": streak, "played": len(finished),
-            "last": "—", "next": "Անհայt", "time": "Անհայտ", "raw_time": None, "odds": ""}
+            "last": "—", "next": "Անհայտ", "time": "Անհայտ", "raw_time": None, "odds": ""}
 
     if finished:
         m = finished[0]
@@ -169,15 +145,12 @@ def analyse_team(team_id, odds_name, all_odds):
                             f"   • {home}: <b>{hp}</b>\n"
                             f"   • <b>Ոչ-Ոքի (X): {dp}</b>\n"
                             f"   • {away}: <b>{ap}</b>\n")
-    if last_draw_ago is None and finished:
-        info["no_draw_season"] = True
     return info
-
 
 def run_football(send=True):
     print("Starting Football (EPL) draw-streak tracker...")
     if not FOOTBALL_DATA_TOKEN:
-        print("FOOTBALL_DATA_TOKEN is not set. Get a free token at https://www.football-data.org/client/register")
+        print("FOOTBALL_DATA_TOKEN is not set.")
         return ""
 
     all_odds = fetch_epl_odds()
@@ -186,37 +159,35 @@ def run_football(send=True):
     for team_id, odds_name in TEAMS.items():
         try:
             t = analyse_team(team_id, odds_name, all_odds)
-            team_infos.append(t)
+            # Միայն այն թիմերը, որոնք հասել են շեմին (օրինակ՝ 5+ խաղ ոչ-ոքի չկա)
+            if t["streak"] >= FOOTBALL_MIN_STREAK:
+                team_infos.append(t)
         except Exception as e:
             print(f"Football error for {odds_name}: {e}")
 
-    # Sort teams chronologically by next match time
+    # Դասավորում ըստ հաջորդ խաղի ժամանակագրության
     team_infos.sort(key=lambda x: x["raw_time"] if x["raw_time"] is not None else datetime.max.replace(tzinfo=timezone.utc))
 
-    lines = ["⚽ <b>EPL — ՇԱՐՔ ԱՌԱՆՑ ՈՉ-ՈՔԻԻ</b>\n"]
-
-    for t in team_infos:
-        hot = t["streak"] >= FOOTBALL_MIN_STREAK
-        mark = "🔥" if hot else "▫️"
-        lines.append(f"{mark} <b>{t['name']}</b> — <code>{t['streak']} խաղ</code> անընդմեջ առանց ոչ-ոքիի")
-        if t.get("no_draw_season"):
-            lines.append(f"   (մրցաշրջանում դեռ ոչ-ոքի չկա, {t['played']} խաղ)")
-        if hot:
+    lines = ["⚽ <b>EPL — ՇԱՐՔ ԱՌԱՆՑ ՈՉ-ՈՔԻԻ (Draw Tracker)</b>\n"]
+    if not team_infos:
+        lines.append("Այս պահին համապատասխան շարքով թիմեր չկան։")
+    else:
+        for t in team_infos:
             step, units, total = get_fibonacci_bet(t["streak"], FOOTBALL_MIN_STREAK)
-            lines.append(f"   📊 <b>Ֆիբոնաչի Քայլ {step}:</b> <code>{units} unit</code> (<b>{total} ֏</b>) — X")
-        lines.append(f"   ▫️ Վերջինը՝ <i>{t['last']}</i>")
-        lines.append(f"   ▫️ Հաջորդը՝ <b>{t['next']}</b>")
-        lines.append(f"   📅 Ժամը (Երևան)՝ <code>{t['time']}</code>")
-        if t["odds"]:
-            lines.append(t["odds"].rstrip("\n"))
-        lines.append("")
+            lines.append(f"• <b>{t['name']}</b> — <code>{t['streak']} խաղ</code> անընդմեջ առանց ոչ-ոքիի")
+            lines.append(f"  📊 <b>Ֆիբոնաչի Քայլ {step}:</b> <code>{units} unit</code> (<b>{total} ֏</b>) — խաղադրույք X (Ոչ-ոքի)")
+            lines.append(f"  ▫️ Վերջինը՝ <i>{t['last']}</i>")
+            lines.append(f"  ▫️ Հաջորդը՝ <b>{t['next']}</b>")
+            lines.append(f"  📅 Ժամը (Երևան)՝ <code>{t['time']}</code>")
+            if t["odds"]:
+                lines.append(t["odds"].rstrip("\n"))
+            lines.append("")
 
     msg = "\n".join(lines)
     print(msg)
     if send:
         send_telegram(msg)
     return msg
-
 
 if __name__ == "__main__":
     run_football()
