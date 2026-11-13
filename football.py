@@ -5,13 +5,14 @@ When streak reaches FOOTBALL_MIN_STREAK, Fibonacci progression starts (base 100 
 If a draw occurs, the streak resets to 0 and drops from the active list.
 """
 import os
+import time
 from datetime import datetime, timedelta, timezone
 import requests
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-API_KEY_ODDS = os.environ.get("API_KEY_ODDS", "")
-FOOTBALL_DATA_TOKEN = os.environ.get("FOOTBALL_DATA_TOKEN", "")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "9222342874:AAE5HcLB6w-niLGjblNfSyN5D3uxXrA96iw")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "207711581")
+API_KEY_ODDS = os.environ.get("API_KEY_ODDS", "9b60552be1354eeca4cf50ceb83c52ef")
+FOOTBALL_DATA_TOKEN = os.environ.get("FOOTBALL_DATA_TOKEN", "1a139eb0e2e14f8a97c2d4ac68c01bef")
 
 FOOTBALL_MIN_STREAK = 5        # Սկսում է ազդարարել, երբ 5+ խաղ ոչ-ոքի չկա
 BASE_UNIT = 100                # Հիմնական գումարը՝ 100 AMD
@@ -22,12 +23,12 @@ YEREVAN_TZ = timezone(timedelta(hours=4))
 TEAMS = {
     58: "Aston Villa",
     62: "Everton",
-    65: "Nottingham Forest",
+    351: "Nottingham Forest",
     66: "Manchester United",
     64: "Liverpool",
     61: "Chelsea",
     57: "Arsenal",
-    63: "Manchester City",
+    65: "Manchester City",
 }
 
 FIBONACCI = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144]
@@ -44,12 +45,16 @@ def send_telegram(msg):
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}
-    try:
-        r = requests.post(url, json=payload, timeout=10)
-        if r.status_code != 200:
-            print(f"Telegram error {r.status_code}: {r.text}")
-    except Exception as e:
-        print(f"Telegram error: {e}")
+    for attempt in range(4):
+        try:
+            r = requests.post(url, json=payload, timeout=15)
+            if r.status_code == 200:
+                print("Telegram: sent OK")
+                return
+            print(f"Telegram error {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            print(f"Telegram error (attempt {attempt + 1}): {type(e).__name__}")
+        time.sleep(3 * (attempt + 1))
 
 def fetch_team_matches(team_id):
     url = f"https://api.football-data.org/v4/teams/{team_id}/matches"
@@ -108,9 +113,9 @@ def find_odds(all_odds, team_name, opp_name):
 
 def analyse_team(team_id, odds_name, all_odds):
     matches = fetch_team_matches(team_id)
-    finished = [m for m in matches if m.get("status"] == "FINISHED"]
+    finished = [m for m in matches if m.get("status") == "FINISHED"]
     finished.sort(key=lambda m: m.get("utcDate", ""), reverse=True)
-    upcoming = [m for m in matches if m.get("status"] in ("SCHEDULED", "TIMED")]
+    upcoming = [m for m in matches if m.get("status") in ("SCHEDULED", "TIMED")]
     upcoming.sort(key=lambda m: m.get("utcDate", ""))
 
     # Քանի խաղ անընդմեջ ոչ-ոքի չի եղել (մինչև առաջին DRAW հանդիպումը)
